@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Centre of Gravity — Single Depot</title>
+    <!-- EXTERNAL ASSETS (CDN): Leaflet CSS/JS + OpenStreetMap tiles. Same
+         external-dependency model folium already used. Needs internet. -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        :root {
+            --slate:#475569; --slate-d:#334155; --emerald:#059669;
+            --bg:#eef2f6; --card:#ffffff; --line:#e2e8f0;
+            --text:#1f2937; --muted:#64748b;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family:'Segoe UI', Tahoma, Verdana, sans-serif; background:var(--bg); color:var(--text); }
+
+        .topbar {
+            background:var(--slate); color:#fff; padding:12px 20px;
+            display:flex; align-items:center; gap:12px;
+        }
+        .topbar h1 { font-size:1.25em; font-weight:700; }
+        .topbar .sub { opacity:.75; font-size:.95em; }
+
+        .export-actions { display:flex; justify-content:flex-end; align-items:center; gap:8px; flex-wrap:wrap; }
+        .export-note { font-size:.72em; color:#b45309; max-width:100%; text-align:right; }
+
+        .layout {
+            display:grid; grid-template-columns:1fr 380px; gap:16px;
+            /* minmax(0, …) lets the row stay the window's height instead of
+               growing to fit a long depot list, so the sidebar scrolls. */
+            grid-template-rows:minmax(0, 1fr);
+            padding:16px; height:calc(100vh - 50px);
+        }
+        #map { border-radius:12px; box-shadow:0 4px 15px rgba(0,0,0,.12); height:100%; }
+        .sidebar { overflow-y:auto; min-height:0; display:flex; flex-direction:column; gap:14px; padding-right:4px; }
+        /* Keep every block at full height: without this the flex column
+           squeezes the depot panel (overflow:hidden) and clips its rows. */
+        .sidebar > * { flex-shrink:0; }
+
+        .cards { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+        .card {
+            background:var(--card); border:1px solid var(--line);
+            border-radius:12px; padding:14px;
+        }
+        .card .num { font-size:1.55em; font-weight:700; color:var(--slate); line-height:1.1; }
+        .card .lbl { font-size:.72em; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; margin-top:4px; }
+
+        .panel { background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+        .panel h2 { font-size:.9em; padding:12px 14px; border-bottom:1px solid var(--line); color:var(--slate-d); }
+        .panel-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:12px 14px; border-bottom:1px solid var(--line); }
+        .panel-head h2 { padding:0; border:none; margin:0; }
+        .show-all-btn {
+            border:1px solid var(--line); background:#f8fafc; color:var(--slate-d);
+            border-radius:8px; padding:5px 10px; font-size:.78em; font-weight:600;
+            cursor:pointer; white-space:nowrap; transition:opacity .12s, background .12s;
+        }
+        .show-all-btn:hover:not(:disabled) { background:#ecfdf5; border-color:#a7f3d0; color:var(--emerald); }
+        .show-all-btn:disabled { opacity:.4; cursor:default; }
+        .depot-hint { padding:8px 14px; font-size:.78em; color:var(--muted); border-bottom:1px solid var(--line); line-height:1.4; }
+
+        .depot-row { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--line); cursor:pointer; transition:background .12s; }
+        .depot-row:hover { background:#f8fafc; }
+        .depot-row.active { background:#ecfdf5; box-shadow:inset 3px 0 0 var(--emerald); }
+        .depot-row:last-child { border-bottom:none; }
+        .chip {
+            width:20px; height:20px; border-radius:5px; flex-shrink:0; border:1px solid rgba(0,0,0,.15);
+            display:flex; align-items:center; justify-content:center;
+            font-size:.68em; font-weight:700; font-variant-numeric:tabular-nums;
+        }
+        .dinfo { flex:1; min-width:0; }
+        .dname { font-weight:600; font-size:.92em; }
+        .dname em { color:var(--emerald); font-style:normal; font-size:.85em; }
+        .dmeta { font-size:.78em; color:var(--muted); font-variant-numeric:tabular-nums; }
+        .dstats { text-align:right; font-size:.85em; font-variant-numeric:tabular-nums; }
+        .dstats .pct { color:var(--muted); }
+        .dstats .dpts { font-size:.78em; color:var(--muted); }
+
+        details.method { background:var(--card); border:1px solid var(--line); border-radius:12px; }
+        details.method > summary {
+            cursor:pointer; padding:12px 14px; font-weight:600; font-size:.9em; color:var(--slate-d);
+            list-style:none;
+        }
+        details.method > summary::before { content:"▸ "; color:var(--emerald); }
+        details.method[open] > summary::before { content:"▾ "; }
+        .mbody { padding:0 14px 14px; font-size:.85em; line-height:1.55; color:#444; }
+        .mbody h3 { color:var(--slate); font-size:1em; margin:14px 0 6px; }
+        .mbody .algo { display:inline-block; background:#ecfdf5; color:var(--emerald); padding:3px 10px; border-radius:20px; font-size:.85em; font-weight:600; margin-bottom:8px; }
+        .mbody ol, .mbody ul { margin-left:18px; margin-top:6px; }
+        .mbody li { margin-bottom:5px; }
+        .mbody .outcome { background:#ecfdf5; border-left:4px solid var(--emerald); padding:10px; border-radius:4px; margin-top:10px; font-style:italic; }
+
+        /* Depot map pin (Leaflet divIcon): ringed dot in the cluster colour,
+           carrying the depot number so identity never rests on colour alone. */
+        .depot-pin span {
+            display:flex; align-items:center; justify-content:center;
+            width:22px; height:22px; border-radius:50%;
+            border:3px solid #fff; box-shadow:0 0 0 1.5px rgba(0,0,0,.45);
+            font:700 11px/1 'Segoe UI', Tahoma, Verdana, sans-serif;
+        }
+
+        @media (max-width:900px) {
+            .layout { grid-template-columns:1fr; height:auto; }
+            #map { height:60vh; }
+        }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <h1>Centre of Gravity</h1>
+        <span class="sub">Depot Location Dashboard</span>
+    </div>
+
+    <div class="layout">
+        <div id="map"></div>
+
+        <div class="sidebar">
+            <!-- Stat cards (nums/labels updated by JS when multi-select changes) -->
+            <div class="cards">
+                <div class="card"><div class="num" id="stat-depots">1</div><div class="lbl" id="stat-depots-lbl">Depots</div></div>
+                <div class="card"><div class="num" id="stat-points">50</div><div class="lbl" id="stat-points-lbl">Delivery points</div></div>
+                <div class="card"><div class="num" id="stat-demand">56,933</div><div class="lbl" id="stat-demand-lbl">Total volume</div></div>
+                <div class="card"><div class="num" id="stat-share">100.0%</div><div class="lbl" id="stat-share-lbl">Largest depot share</div></div>
+            </div>
+
+            <!-- Depots & clusters list -->
+            <div class="panel">
+                <div class="panel-head">
+                    <h2>Depots &amp; clusters</h2>
+                    <button type="button" class="show-all-btn" id="show-all-btn" disabled title="Clear depot selection">Show all</button>
+                </div>
+                
+                <div class="depot-row" data-cluster="0">
+                    <span class="chip" style="background:#242beb;color:#ffffff">0</span>
+                    <div class="dinfo">
+                        <div class="dname">Depot 0</div>
+                        <div class="dmeta">-31.861442, 115.833884</div>
+                    </div>
+                    <div class="dstats">
+                        <div>56,933 <span class="pct">(100.0%)</span></div>
+                        <div class="dpts">50 pts</div>
+                    </div>
+                </div>
+                
+            </div>
+
+            <!-- Collapsible methodology (reused content) -->
+            <details class="method">
+                <summary>Methodology — Single Depot</summary>
+                <div class="mbody">
+                    <h3>Core algorithm: Weighted Geometric Median</h3>
+                    <p>The point that minimises the sum of demand-weighted distances to all
+                       demand points, found by iterative Weiszfeld refinement (start at the
+                       weighted average, reweight by 1/distance, repeat until the move is
+                       below tolerance).</p>
+
+                    
+                    <h3>Single Depot</h3>
+                    <span class="algo">solve_single_depot_weighted_geometric_median()</span>
+                    <ol>
+                        <li>Keep points with positive demand; project lat/lon to local metres.</li>
+                        <li>Run the weighted geometric median to find the optimal centre.</li>
+                        <li>Convert back to lat/lon; report the total weighted-distance objective.</li>
+                    </ol>
+                    <div class="outcome">One depot minimising total weighted distance to every demand point.</div>
+                    
+
+                    
+
+                    
+
+                    <h3>Key features</h3>
+                    <ul>
+                        <li>Equirectangular projection to local metres for geodetic accuracy.</li>
+                        <li>Demand weighting throughout (clustering and medians).</li>
+                        <li>Iterative refinement with tolerance-based convergence.</li>
+                    </ul>
+                </div>
+            </details>
+
+            <div class="export-actions">
+                <span class="export-note" id="export-note"></span>
+                <button type="button" class="show-all-btn" id="export-png-btn">Export map (PNG)</button>
+                <button type="button" class="show-all-btn" id="export-csv-btn">Export data (CSV)</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Data injected by report.py (single source of truth = the solver's output).
+        const POINTS = [[-31.92934,115.85291,621.250546,0],[-31.93567,115.83433,572.8666609,0],[-31.9566,115.81143,1235.95214,0],[-31.98579,115.80469,1240.614774,0],[-31.97165,115.77639,1334.983443,0],[-31.99637,115.75765,706.220286,0],[-32.01598,115.7634,572.7437309,0],[-31.93639,115.80817,1271.462757,0],[-31.93845,115.76468,468.2150036,0],[-31.92122,115.83118,661.0254686,0],[-31.90836,115.81456,773.7272725,0],[-31.89196,115.78682,2520.139827,0],[-31.90733,115.76918,1473.186948,0],[-31.8527,115.7654,1406.148383,0],[-31.87167,115.81193,1294.950527,0],[-31.852,115.80924,282.4331293,0],[-31.83447,115.77403,931.4247264,0],[-31.83489,115.80307,795.4620121,0],[-31.79583,115.75441,1993.126784,0],[-31.80171,115.79983,1238.92907,0],[-31.76335,115.75641,2652.342201,0],[-31.73372,115.74765,1428.64901,0],[-31.8769,115.75569,218.8752393,0],[-31.68734,115.71168,2191.515732,0],[-31.69254,115.77214,895.3307311,0],[-31.58561,115.66388,541.5370109,0],[-31.52472,115.7299,968.3631706,0],[-31.64938,115.70986,959.1904411,0],[-31.48847,115.61611,215.4360804,0],[-32.28915,115.72305,726.0923516,0],[-31.93057,115.87186,885.1697424,0],[-31.93811,115.89959,641.6795594,0],[-31.91546,115.88398,647.1390327,0],[-31.92086,115.91485,1004.114785,0],[-31.9018,115.94257,1111.028949,0],[-31.82796,115.97341,2008.105322,0],[-31.8384,116.0261,2265.215547,0],[-31.88286,115.86173,1147.050407,0],[-31.90324,115.84088,1284.675727,0],[-31.86411,115.84348,1359.463804,0],[-31.88632,115.89088,1565.156855,0],[-31.86682,115.93782,607.2634925,0],[-31.83533,115.8491,1127.174263,0],[-31.69444,115.84533,3907.21914,0],[-31.84269,115.89651,782.7993337,0],[-31.78157,115.98925,2263.688903,0],[-31.92904,116.07927,210.1095468,0],[-32.10896,116.20826,1261.311915,0],[-31.69444,115.84533,149.3917284,0],[-31.86259,115.89425,513.2045804,0]];    // [ [lat, lon, demand, cluster_id], ... ]
+        const DEPOTS = [{"id": 0, "label": "Depot 0", "name": null, "lat": -31.861442, "lon": 115.833884, "color": "#242beb", "ink": "#ffffff", "demand": "56,933", "points": 50, "is_fixed": false, "demand_raw": 56933.1580906, "lat_raw": -31.861442, "lon_raw": 115.833884, "cap_raw": null, "pct_raw": 100.0}];     // [ {id, lat, lon, color, demand, points}, ... ]
+        const COLORS = {"0": "#242beb"};     // { cluster_id: hex }
+        const CENTER = [-31.8571026428, 115.83148244999998];     // [lat, lon]
+        const DMIN = 149.3917284, DMAX = 3907.21914;
+        const RUN = {"solver_mode": "Single Depot", "dataset": null, "mode_tag": null, "generated_at": null, "depots": 1, "delivery_points": 50, "total_demand_items": 56933.1580906, "objective_item_km": null, "objective_item_m": null, "largest_depot_demand_share_pct": 100.0};            // run summary — CSV/PNG export use this, never re-derive
+
+        // Radius scaled by demand. Lever 1: smaller dots (2..10 px) to cut
+        // overplotting where individual dots show at dense zoom.
+        const DSPAN = (DMAX > DMIN) ? (DMAX - DMIN) : 1;
+        function radiusFor(w) { return 2 + 8 * (w - DMIN) / DSPAN; }
+
+        const map = L.map('map', { preferCanvas: true }).setView(CENTER, 11);
+        // Muted grayscale basemap so the cluster colours are the only saturated
+        // thing on screen. CARTO now requires an API key and serves anonymous
+        // callers tiles stamped "API KEY REQUIRED", so this is Esri's key-free
+        // Light Gray Canvas (base + labels, separate services). Esri has real
+        // data only to zoom 16 ("Map data not yet available" above it), so
+        // deeper zooms upscale the z16 tiles. Both send CORS headers, which the
+        // PNG export needs (crossOrigin keeps the composite canvas untainted).
+        const ESRI_CANVAS = 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/';
+        L.tileLayer(ESRI_CANVAS + 'World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+            maxZoom: 20, maxNativeZoom: 16, crossOrigin: 'anonymous',
+            attribution: 'Tiles © Esri — Esri, HERE, Garmin, © OpenStreetMap contributors'
+        }).addTo(map);
+        L.tileLayer(ESRI_CANVAS + 'World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {
+            maxZoom: 20, maxNativeZoom: 16, crossOrigin: 'anonymous'
+        }).addTo(map);
+
+        // Demand points: ONE custom canvas layer that paints every point in a
+        // single loop per redraw — NO per-point objects (69,743 dots, ZERO
+        // markers/circles). Bold fill + thin same-hue stroke; demand-scaled
+        // radius; dashboard palette colours. It redraws only on moveend and hides during
+        // the zoom animation (leaflet-zoom-hide), so pan/zoom stay smooth. This
+        // is what removes the interaction lag of 70k L.circleMarker objects.
+        const TWO_PI = Math.PI * 2;
+        function drawDot(ctx, x, y, p) {
+            const c = COLORS[p[3]] || '#888';
+            ctx.beginPath();
+            ctx.arc(x, y, radiusFor(p[2]), 0, TWO_PI);
+            ctx.globalAlpha = 0.75;              // bold fill
+            ctx.fillStyle = c;
+            ctx.fill();
+            ctx.globalAlpha = 0.9;               // thin 1px same-hue stroke
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = c;
+            ctx.stroke();
+        }
+
+        // Shared point-drawing loop: filter + off-screen cull + drawDot, with
+        // the lat/lng -> canvas-pixel projection injected by the caller. The
+        // live canvas layer projects via layerPoint-minus-origin; the PNG
+        // exporter projects via latLngToContainerPoint. Same loop either way.
+        function drawPoints(ctx, points, project, filter, bounds) {
+            const south = bounds.getSouth(), north = bounds.getNorth(),
+                  west = bounds.getWest(), east = bounds.getEast();
+            for (let i = 0; i < points.length; i++) {
+                const p = points[i];
+                if (filter.size > 0 && !filter.has(p[3])) continue;
+                const lat = p[0], lng = p[1];
+                if (lat < south || lat > north || lng < west || lng > east) continue;
+                const xy = project(lat, lng);
+                drawDot(ctx, xy.x, xy.y, p);
+            }
+        }
+
+        const PointsCanvas = L.Layer.extend({
+            initialize: function (points) {
+                this._points = points;
+                this._filter = new Set();        // empty = all clusters; else selected ids
+                this._pad = 0.15;                // draw a margin beyond the viewport
+            },
+            onAdd: function (map) {
+                const canvas = this._canvas =
+                    L.DomUtil.create('canvas', 'leaflet-layer leaflet-zoom-hide');
+                this._ctx = canvas.getContext('2d');
+                map.getPanes().overlayPane.appendChild(canvas);
+                map.on('moveend', this._reset, this);
+                map.on('resize', this._resize, this);
+                this._resize();
+                this._reset();
+            },
+            onRemove: function (map) {
+                L.DomUtil.remove(this._canvas);
+                map.off('moveend', this._reset, this);
+                map.off('resize', this._resize, this);
+            },
+            setFilter: function (ids) { this._filter = ids; this._redraw(); },
+            _resize: function () {
+                const s = this._map.getSize().multiplyBy(1 + this._pad * 2);
+                this._canvas.width = Math.round(s.x);
+                this._canvas.height = Math.round(s.y);
+                this._canvas.style.width = s.x + 'px';
+                this._canvas.style.height = s.y + 'px';
+            },
+            _reset: function () {
+                const map = this._map;
+                const min = map.containerPointToLayerPoint(
+                    map.getSize().multiplyBy(-this._pad)).round();
+                this._origin = min;
+                L.DomUtil.setPosition(this._canvas, min);
+                this._redraw();
+            },
+            _redraw: function () {
+                if (!this._origin) return;
+                const ctx = this._ctx, map = this._map, origin = this._origin;
+                ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+                drawPoints(ctx, this._points, function (lat, lng) {
+                    const lp = map.latLngToLayerPoint([lat, lng]);
+                    return { x: lp.x - origin.x, y: lp.y - origin.y };
+                }, this._filter, map.getBounds());
+                ctx.globalAlpha = 1;
+            }
+        });
+
+        const pointsLayer = new PointsCanvas(POINTS).addTo(map);
+
+        // Multi-select: empty Set = show all. Click depot pin or sidebar row to
+        // toggle that cluster in/out. Visible points = union of selected clusters.
+        // No sidebar row is active when the set is empty ("all visible" is not a selection).
+        const selected = new Set();
+
+        // Jinja totals — restore these when selection is cleared.
+        const ORIG = {
+            points: document.getElementById('stat-points').textContent,
+            demand: document.getElementById('stat-demand').textContent,
+            share: document.getElementById('stat-share').textContent,
+            pointsLbl: document.getElementById('stat-points-lbl').textContent,
+            demandLbl: document.getElementById('stat-demand-lbl').textContent,
+            shareLbl: document.getElementById('stat-share-lbl').textContent
+        };
+        // Depots tile stays the full solve count (not selection size).
+        const showAllBtn = document.getElementById('show-all-btn');
+
+        function parseDemand(v) {
+            if (typeof v === 'number') return v;
+            return parseFloat(String(v).replace(/,/g, '')) || 0;
+        }
+        function fmtInt(n) {
+            return Math.round(n).toLocaleString('en-US');
+        }
+        function fmtShare(pct) {
+            return (Math.round(pct * 10) / 10).toFixed(1) + '%';
+        }
+
+        function updateTiles() {
+            const ptsEl = document.getElementById('stat-points');
+            const demEl = document.getElementById('stat-demand');
+            const shareEl = document.getElementById('stat-share');
+            const ptsLbl = document.getElementById('stat-points-lbl');
+            const demLbl = document.getElementById('stat-demand-lbl');
+            const shareLbl = document.getElementById('stat-share-lbl');
+
+            if (selected.size === 0) {
+                ptsEl.textContent = ORIG.points;
+                demEl.textContent = ORIG.demand;
+                shareEl.textContent = ORIG.share;
+                ptsLbl.textContent = ORIG.pointsLbl;
+                demLbl.textContent = ORIG.demandLbl;
+                shareLbl.textContent = ORIG.shareLbl;
+                return;
+            }
+
+            let points = 0, demand = 0, maxDem = 0;
+            DEPOTS.forEach(function (d) {
+                if (!selected.has(d.id)) return;
+                points += d.points;
+                const dem = parseDemand(d.demand);
+                demand += dem;
+                if (dem > maxDem) maxDem = dem;
+            });
+            const share = demand > 0 ? (maxDem / demand * 100) : 0;
+            ptsEl.textContent = fmtInt(points);
+            demEl.textContent = fmtInt(demand);
+            shareEl.textContent = fmtShare(share);
+            ptsLbl.textContent = 'Delivery points (selection)';
+            demLbl.textContent = 'Total volume (selection)';
+            // Largest selected depot's demand / selected demand sum.
+            shareLbl.textContent = 'Largest depot share (of selection)';
+        }
+
+        function refreshSelectionUi() {
+            pointsLayer.setFilter(selected);
+            document.querySelectorAll('.depot-row').forEach(function (row) {
+                const cid = parseInt(row.dataset.cluster, 10);
+                row.classList.toggle('active', selected.has(cid));
+            });
+            showAllBtn.disabled = selected.size === 0;
+            updateTiles();
+        }
+
+        function toggleCluster(cid) {
+            if (selected.has(cid)) selected.delete(cid);
+            else selected.add(cid);
+            refreshSelectionUi();
+        }
+
+        function clearSelection() {
+            selected.clear();
+            refreshSelectionUi();
+        }
+
+        showAllBtn.addEventListener('click', clearSelection);
+
+        // "TULLAMARINE PDC (Depot 0)" for named depots, else "Depot 0".
+        function depotTitle(d) {
+            return d.name ? d.name + ' (Depot ' + d.id + ')' : 'Depot ' + d.id;
+        }
+
+        // Depot pins — coloured divIcon, hover tooltip, click to toggle.
+        DEPOTS.forEach(function (d) {
+            const icon = L.divIcon({
+                className: 'depot-pin',
+                html: '<span style="background:' + d.color + ';color:' + d.ink + '">' +
+                      d.id + '</span>',
+                iconSize: [28, 28], iconAnchor: [14, 14]
+            });
+            L.marker([d.lat, d.lon], { icon: icon })
+                .addTo(map)
+                .bindTooltip(depotTitle(d) + ' — ' + d.demand +
+                             ' demand, ' + d.points + ' pts')
+                .on('click', function () { toggleCluster(d.id); });
+        });
+
+        // Sidebar rows toggle the same clusters.
+        document.querySelectorAll('.depot-row').forEach(function (row) {
+            row.addEventListener('click', function () {
+                toggleCluster(parseInt(row.dataset.cluster, 10));
+            });
+        });
+
+        // ---- Export: PNG (map, screen-accurate) and CSV (full run) --------
+
+        function timestampTag() {
+            const d = new Date();
+            const pad = function (n) { return String(n).padStart(2, '0'); };
+            return d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '_' +
+                   pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+        }
+
+        function exportFilenameBase() {
+            return (RUN.dataset || 'dataset') + '_' + (RUN.mode_tag || 'run') + '_' + timestampTag();
+        }
+
+        function downloadBlob(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function roundRectPath(ctx, x, y, w, h, r) {
+            ctx.beginPath();
+            ctx.moveTo(x + r, y);
+            ctx.arcTo(x + w, y, x + w, y + h, r);
+            ctx.arcTo(x + w, y + h, x, y + h, r);
+            ctx.arcTo(x, y + h, x, y, r);
+            ctx.arcTo(x, y, x + w, y, r);
+            ctx.closePath();
+        }
+
+        // Licence condition for a PNG leaving the company: burn the basemap
+        // attribution into the image itself.
+        function drawAttributionPill(ctx, sizeX, sizeY) {
+            const text = 'Tiles © Esri — Esri, HERE, Garmin, © OpenStreetMap contributors';
+            ctx.font = '11px "Segoe UI", Tahoma, Verdana, sans-serif';
+            const padX = 6, textH = 12, boxH = textH + 8;
+            const boxW = ctx.measureText(text).width + padX * 2;
+            const x = sizeX - boxW - 8, y = sizeY - boxH - 8;
+            ctx.fillStyle = 'rgba(255,255,255,.82)';
+            roundRectPath(ctx, x, y, boxW, boxH, 8);
+            ctx.fill();
+            ctx.fillStyle = '#334155';
+            ctx.fillText(text, x + padX, y + boxH - 6);
+        }
+
+        // Depot pin drawn to match .depot-pin: 22px numbered circle, 3px white ring.
+        function drawDepotPins(ctx, project) {
+            DEPOTS.forEach(function (d) {
+                const xy = project(d.lat_raw, d.lon_raw);
+                ctx.beginPath();
+                ctx.arc(xy.x, xy.y, 11, 0, TWO_PI);
+                ctx.fillStyle = d.color;
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(xy.x, xy.y, 12.5, 0, TWO_PI);
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = '#fff';
+                ctx.stroke();
+                ctx.font = 'bold 11px "Segoe UI", Tahoma, Verdana, sans-serif';
+                ctx.fillStyle = d.ink;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(String(d.id), xy.x, xy.y + 0.5);
+                ctx.textAlign = 'start';
+                ctx.textBaseline = 'alphabetic';
+            });
+        }
+
+        // Legend for the exported PNG only (never shown on-screen) -- top-left,
+        // one row per depot: [chip] label   lat, lon (label = depot name, else
+        // "Depot N"). No demand/points/share; those live in the CSV now.
+        function drawDepotLegend(ctx) {
+            const padX = 10, padY = 8, rowH = 18, chipSize = 12, gap = 6, labelGap = 8;
+            const font = '11px "Segoe UI", Tahoma, Verdana, sans-serif';
+            const boldFont = 'bold 11px "Segoe UI", Tahoma, Verdana, sans-serif';
+
+            ctx.font = boldFont;
+            let maxWidth = 0;
+            DEPOTS.forEach(function (d) {
+                ctx.font = boldFont;
+                const labelW = ctx.measureText(d.label).width;
+                ctx.font = font;
+                const metaW = ctx.measureText(d.lat + ', ' + d.lon).width;
+                const w = chipSize + gap + labelW + labelGap + metaW;
+                if (w > maxWidth) maxWidth = w;
+            });
+
+            const boxX = 8, boxY = 8;
+            const boxW = maxWidth + padX * 2;
+            const boxH = DEPOTS.length * rowH + padY * 2 - (rowH - chipSize);
+            ctx.fillStyle = 'rgba(255,255,255,.85)';
+            roundRectPath(ctx, boxX, boxY, boxW, boxH, 8);
+            ctx.fill();
+
+            DEPOTS.forEach(function (d, i) {
+                const rowY = boxY + padY + i * rowH;
+                ctx.fillStyle = d.color;
+                roundRectPath(ctx, boxX + padX, rowY, chipSize, chipSize, 4);
+                ctx.fill();
+                ctx.lineWidth = 1;
+                ctx.strokeStyle = 'rgba(0,0,0,.15)';
+                roundRectPath(ctx, boxX + padX, rowY, chipSize, chipSize, 4);
+                ctx.stroke();
+
+                const textY = rowY + chipSize - 2;
+                ctx.font = boldFont;
+                ctx.fillStyle = '#1f2937';
+                const label = d.label;
+                ctx.fillText(label, boxX + padX + chipSize + gap, textY);
+                const labelW = ctx.measureText(label).width;
+
+                ctx.font = font;
+                ctx.fillStyle = '#64748b';
+                ctx.fillText(d.lat + ', ' + d.lon,
+                             boxX + padX + chipSize + gap + labelW + labelGap, textY);
+            });
+        }
+
+        function containerProject(lat, lng) {
+            return map.latLngToContainerPoint([lat, lng]);
+        }
+
+        function newExportCanvas(sizeX, sizeY) {
+            const dpr = window.devicePixelRatio || 1;
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.round(sizeX * dpr);
+            canvas.height = Math.round(sizeY * dpr);
+            const ctx = canvas.getContext('2d');
+            ctx.scale(dpr, dpr);
+            return { canvas: canvas, ctx: ctx };
+        }
+
+        // No basemap tiles (tainted canvas fallback): points + pins on white.
+        function exportPngFallback(note) {
+            const size = map.getSize();
+            const built = newExportCanvas(size.x, size.y);
+            built.ctx.fillStyle = '#ffffff';
+            built.ctx.fillRect(0, 0, size.x, size.y);
+            drawPoints(built.ctx, POINTS, containerProject, selected, map.getBounds());
+            drawDepotPins(built.ctx, containerProject);
+            drawDepotLegend(built.ctx);
+            drawAttributionPill(built.ctx, size.x, size.y);
+            note.textContent = 'Basemap tiles could not be included in the PNG (blocked by the browser); exported points and depots only.';
+            built.canvas.toBlob(function (blob) {
+                downloadBlob(blob, 'cog_map_' + exportFilenameBase() + '.png');
+            });
+        }
+
+        document.getElementById('export-png-btn').addEventListener('click', function () {
+            const note = document.getElementById('export-note');
+            note.textContent = '';
+            const size = map.getSize();
+            const mapRect = map.getContainer().getBoundingClientRect();
+            try {
+                const built = newExportCanvas(size.x, size.y);
+                const ctx = built.ctx;
+
+                // a. basemap tiles — positioned from their own rect, not by
+                //    reconstructing Leaflet's pane transforms.
+                map.getContainer()
+                    .querySelectorAll('.leaflet-tile-pane img.leaflet-tile-loaded')
+                    .forEach(function (img) {
+                        if (img.naturalWidth === 0) return;
+                        const r = img.getBoundingClientRect();
+                        ctx.drawImage(img, r.left - mapRect.left, r.top - mapRect.top, r.width, r.height);
+                    });
+
+                // b. demand points, respecting the active cluster selection (WYSIWYG).
+                drawPoints(ctx, POINTS, containerProject, selected, map.getBounds());
+
+                // c. depot pins.
+                drawDepotPins(ctx, containerProject);
+
+                drawDepotLegend(ctx);
+                drawAttributionPill(ctx, size.x, size.y);
+
+                built.canvas.toBlob(function (blob) {
+                    downloadBlob(blob, 'cog_map_' + exportFilenameBase() + '.png');
+                });
+            } catch (err) {
+                if (err && err.name === 'SecurityError') {
+                    exportPngFallback(note);
+                } else {
+                    note.textContent = 'Map export failed: ' + (err && err.message ? err.message : err);
+                }
+            }
+        });
+
+        function csvCell(v) {
+            if (v === null || v === undefined) return '';
+            const s = String(v);
+            if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+            return s;
+        }
+        function csvRow(cells) { return cells.map(csvCell).join(',') + '\r\n'; }
+
+        // One flat table, one row per point, always the FULL run (ignoring
+        // the current map cluster selection -- the map export is WYSIWYG,
+        // the CSV is the run). objective_item_km is the run's total,
+        // repeated on every row -- "n/a" (string, not blank/0) for Single
+        // Depot, where the solver has no objective at all. point_index is
+        // the solver-internal index (zero-demand input rows dropped and
+        // reindexed; NOT the input CSV row) -- no comment line in the file
+        // itself, the file starts directly with the header row.
+        function buildPointsCsv() {
+            const depotById = {};
+            DEPOTS.forEach(function (d) { depotById[d.id] = d; });
+            const objVal = (RUN.objective_item_km === null || RUN.objective_item_km === undefined)
+                ? 'n/a' : RUN.objective_item_km;
+
+            let out = '';
+            out += csvRow(['point_index', 'latitude', 'longitude', 'demand_items',
+                            'cluster_id', 'depot_name', 'depot_lat', 'depot_lon',
+                            'objective_item_km']);
+            POINTS.forEach(function (p, i) {
+                const d = depotById[p[3]];
+                out += csvRow([i, p[0], p[1], p[2], p[3], d ? d.label : '',
+                               d ? d.lat_raw : '', d ? d.lon_raw : '', objVal]);
+            });
+            return out;
+        }
+
+        document.getElementById('export-csv-btn').addEventListener('click', function () {
+            const csv = '﻿' + buildPointsCsv();
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+            downloadBlob(blob, 'cog_data_' + exportFilenameBase() + '.csv');
+        });
+    </script>
+</body>
+</html>

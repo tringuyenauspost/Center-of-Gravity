@@ -1,0 +1,39 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Run artifacts
+outputs/
+*.log
+.pytest_cache/
+bench_solvers.py
+perth_compare.py
+capacity_experiment3_k4.py
+
+# Scratch solver labs and root-level map artifacts
+solvers_ala_only.py
+solvers_all_fixes.py
+/clusters_map.html
+/clusters_map_*.html
+
+# Local-only working notes — kept on disk, deliberately not shared
+CHANGES.md
+
+# Raw QGIS / ArcGIS validation exports — evidence for the report, kept local
+/QGIS/
+/inputs/validation_run_ArcGIS_streetnetwork*
+
+# Report-authoring tools — kept locally, not part of the application
+/tools/
+
+# Real business data - kept local, never pushed (tests use the small samples)
+/inputs/future_demand.csv
+/inputs/malaga_pdc.csv
+/inputs/fixed_faclities.csv

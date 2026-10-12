@@ -1,0 +1,13 @@
+# Normalize every text file to LF in the repo and the working tree, so a
+# CRLF-defaulting editor never churns whole files in the diff (overrides the
+# local core.autocrlf=true for this repo).
+* text=auto eol=lf
+
+# Jinja2 templates are read as raw bytes (no newline translation) and the
+# rendered output is golden-tested byte-for-byte, so keep them LF everywhere.
+*.j2 text eol=lf
+
+# Windows batch files must be CRLF — cmd.exe skips goto/call targets
+# unpredictably in LF-only .bat when launched via ShellExecute (double-click).
+*.bat text eol=crlf
+*.cmd text eol=crlf
