@@ -179,10 +179,16 @@ What happens under the hood when a cap is set:
    marginally above its cap — so when the count is nonzero, check the
    assigned-demand column in the depot table against the caps you set,
    rather than assuming the cap held.
-4. If there are no free depots and every fixed depot is capped, COG checks
-   feasibility before solving at all: if the caps' total is less than the
-   dataset's total demand, it stops with an explicit "Infeasible capacity"
-   error rather than producing a silently wrong answer.
+4. If there are no free depots, every fixed depot is capped, and the caps'
+   total is less than the dataset's total demand, COG still runs. It serves
+   as much demand as the caps allow, filling each depot with the nearest
+   points, and leaves the rest **unserved**. Unserved points are drawn in
+   near-black on the map, listed as an "Unserved" row in the sidebar, and
+   summed in a red "Unserved volume" card. The Results tab adds a line
+   `Unserved: … points, … items (…% of demand) exceed total depot capacity`.
+   This shows where the network is short of capacity. The objective and
+   average km per item cover served demand only, and the CSV export labels
+   these points `UNSERVED` with `cluster_id` -1.
 
 **What a capped run looks like on the map.** A cap makes some points travel
 further than they would otherwise. Once a depot is full, points near its
@@ -307,7 +313,6 @@ correctness; this guide is about how to operate the tool.
 | "CSV file missing required column" | The file is missing `latitude`, `longitude`, or `demand_items` — check column names exactly. |
 | "File not found" | The CSV path is stale (moved/renamed file, or a relative path from a different working directory). |
 | "Fixed depot details need attention: Depot N: …" | A fixed depot's row is missing or invalid (latitude outside -90 to 90, longitude outside -180 to 180, or Max items not a whole number of at least 1). The problem is shown in red under the fixed-depot table so you can correct it there. "May be swapped" means the latitude and longitude look entered the wrong way round. |
-| "Infeasible capacity: fixed depot demand caps sum to … < … total demand" | With zero free depots, every fixed depot's cap must add up to at least the dataset's total demand — raise a cap, or add a free/uncapped depot to absorb the rest. |
 | "Demand must be integer-valued for … capacity" | A capacity cap is set somewhere and at least one `demand_items` value is fractional. Round/aggregate demand first, or remove the cap. |
 | Map report opens but the background is blank/grey | No internet connection — the map tiles load from a CDN. The depot data itself is unaffected. |
 

@@ -80,6 +80,11 @@
         .dstats .dpts-cap { font-size:.85em; font-weight:600; color:var(--slate-d); }
         .dstats .dvol { font-size:.78em; color:var(--muted); margin-top:2px; }
         {%- endif %}
+        {%- if has_unserved %}
+        .unserved-card { grid-column:1 / -1; border-color:#fca5a5; background:#fef2f2; }
+        .unserved-card .num { color:#b91c1c; }
+        .unserved-card .num .pct { font-size:.6em; font-weight:600; }
+        {%- endif %}
 
         details.method { background:var(--card); border:1px solid var(--line); border-radius:12px; }
         details.method > summary {
@@ -126,6 +131,9 @@
                 <div class="card"><div class="num" id="stat-points">{{ stat_points }}</div><div class="lbl" id="stat-points-lbl">Delivery points</div></div>
                 <div class="card"><div class="num" id="stat-demand">{{ stat_demand }}</div><div class="lbl" id="stat-demand-lbl">Total volume</div></div>
                 <div class="card"><div class="num" id="stat-share">{{ stat_share }}%</div><div class="lbl" id="stat-share-lbl">{{ stat_share_label }}</div></div>
+                {%- if has_unserved %}
+                <div class="card unserved-card"><div class="num">{{ unserved.demand }} <span class="pct">({{ unserved.pct }}%)</span></div><div class="lbl">Unserved volume: {{ unserved.points_label }} pts beyond depot capacity</div></div>
+                {%- endif %}
             </div>
 
             <!-- Depots & clusters list -->
@@ -152,6 +160,19 @@
                     </div>
                 </div>
                 {% endfor %}
+                {%- if has_unserved %}
+                <div class="depot-row" data-cluster="-1">
+                    <span class="chip" style="background:{{ unserved.color }};color:{{ unserved.ink }}">!</span>
+                    <div class="dinfo">
+                        <div class="dname">Unserved</div>
+                        <div class="dmeta">No depot has capacity left</div>
+                    </div>
+                    <div class="dstats">
+                        <div class="dpts-cap">volume {{ unserved.demand }}</div>
+                        <div class="dvol">{{ unserved.points_label }} pts <span class="pct">({{ unserved.pct }}%)</span></div>
+                    </div>
+                </div>
+                {%- endif %}
             </div>
 
             <!-- Collapsible methodology (reused content) -->
@@ -195,6 +216,9 @@
                         <li>Keep the start with the lowest objective; report per-depot metrics.</li>
                         {%- if has_fixed_cap %}
                         <li>Optional hard max-demand (items) cap per fixed depot (each may be capped or unlimited): nearest-depot assignment first; if a capped fixed depot would exceed its demand limit, reassign with a min-cost-flow network (unit cost = distance; flow = demand). Free depots stay unlimited.</li>
+                        {%- if has_unserved %}
+                        <li>Every depot is capped and the caps sum to less than total demand, so the demand that does not fit is left unserved (shown in near-black). The flow serves as much demand as possible from the nearest depots; the unserved points are where the network lacks capacity. The objective covers served demand only.</li>
+                        {%- endif %}
                         {%- endif %}
                     </ol>
                     <div class="outcome">m depots pinned to existing infrastructure; the free depots optimise around them{%- if has_fixed_cap %}, with optional per-fixed-depot demand caps{%- endif %}.</div>
@@ -229,6 +253,10 @@
         const CENTER = {{ center_json }};     // [lat, lon]
         const DMIN = {{ demand_min }}, DMAX = {{ demand_max }};
         const RUN = {{ run_json }};            // run summary — CSV/PNG export use this, never re-derive
+        {%- if has_unserved %}
+        const UNSERVED = {{ unserved_json }};  // demand no depot had capacity for (cluster_id -1)
+        const LEGEND = DEPOTS.concat([{ label: 'Unserved', color: UNSERVED.color, meta: 'no depot capacity' }]);
+        {%- endif %}
 
         // Radius scaled by demand. Lever 1: smaller dots (2..10 px) to cut
         // overplotting where individual dots show at dense zoom.
@@ -394,6 +422,12 @@
                 demand += dem;
                 if (dem > maxDem) maxDem = dem;
             });
+            {%- if has_unserved %}
+            if (selected.has(-1)) {
+                points += UNSERVED.points;
+                demand += UNSERVED.demand_raw;
+            }
+            {%- endif %}
             const share = demand > 0 ? (maxDem / demand * 100) : 0;
             ptsEl.textContent = fmtInt(points);
             demEl.textContent = fmtInt(demand);
@@ -525,7 +559,7 @@
                 ctx.textBaseline = 'alphabetic';
             });
         }
-
+{# Legend text: unserved row carries its own meta, depots show lat, lon. #}{% set legend_meta = "(d.meta || d.lat + ', ' + d.lon)" if has_unserved else "d.lat + ', ' + d.lon" %}
         // Legend for the exported PNG only (never shown on-screen) -- top-left,
         // one row per depot: [chip] label   lat, lon (label = depot name, else
         // "Depot N"). No demand/points/share; those live in the CSV now.
@@ -536,23 +570,23 @@
 
             ctx.font = boldFont;
             let maxWidth = 0;
-            DEPOTS.forEach(function (d) {
+            {{ 'LEGEND' if has_unserved else 'DEPOTS' }}.forEach(function (d) {
                 ctx.font = boldFont;
                 const labelW = ctx.measureText(d.label).width;
                 ctx.font = font;
-                const metaW = ctx.measureText(d.lat + ', ' + d.lon).width;
+                const metaW = ctx.measureText({{ legend_meta }}).width;
                 const w = chipSize + gap + labelW + labelGap + metaW;
                 if (w > maxWidth) maxWidth = w;
             });
 
             const boxX = 8, boxY = 8;
             const boxW = maxWidth + padX * 2;
-            const boxH = DEPOTS.length * rowH + padY * 2 - (rowH - chipSize);
+            const boxH = {{ 'LEGEND' if has_unserved else 'DEPOTS' }}.length * rowH + padY * 2 - (rowH - chipSize);
             ctx.fillStyle = 'rgba(255,255,255,.85)';
             roundRectPath(ctx, boxX, boxY, boxW, boxH, 8);
             ctx.fill();
 
-            DEPOTS.forEach(function (d, i) {
+            {{ 'LEGEND' if has_unserved else 'DEPOTS' }}.forEach(function (d, i) {
                 const rowY = boxY + padY + i * rowH;
                 ctx.fillStyle = d.color;
                 roundRectPath(ctx, boxX + padX, rowY, chipSize, chipSize, 4);
@@ -571,7 +605,7 @@
 
                 ctx.font = font;
                 ctx.fillStyle = '#64748b';
-                ctx.fillText(d.lat + ', ' + d.lon,
+                ctx.fillText({{ legend_meta }},
                              boxX + padX + chipSize + gap + labelW + labelGap, textY);
             });
         }
@@ -665,6 +699,9 @@
         function buildPointsCsv() {
             const depotById = {};
             DEPOTS.forEach(function (d) { depotById[d.id] = d; });
+            {%- if has_unserved %}
+            depotById[-1] = { label: 'UNSERVED', lat_raw: '', lon_raw: '' };
+            {%- endif %}
             const objVal = (RUN.objective_item_km === null || RUN.objective_item_km === undefined)
                 ? 'n/a' : RUN.objective_item_km;
 

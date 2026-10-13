@@ -43,10 +43,14 @@ def weighted_geometric_median(X, weights, tol=1e-6, max_iter=500):
     return y
 
 
+# cluster_id given to a point no depot has capacity left to serve.
+UNSERVED = -1
+
 # Stats from the last capacity-constrained solve (for UI/run logs).
 _LAST_CAP_STATS = {
     "split_points_last": 0, "split_points_max": 0, "mcf_calls": 0,
     "cap_overflow_last": 0, "cap_overflow_max": 0, "cap_overflow_by_depot": [],
+    "unserved_points": 0, "unserved_demand": 0,
 }
 
 
@@ -77,6 +81,11 @@ def _mcf_assignment(X, centers, w, capacities):
     only (weighting comes from flow volume). Point→depot arc capacity is
     int(w_i). Uses bulk OR-Tools APIs. After the (splittable) solve, each point
     is repaired wholly onto the depot carrying the largest share of its flow.
+
+    When the caps sum to less than total demand, an extra "unserved" node
+    takes the shortfall at a penalty dearer than any rerouting, so as much
+    demand as possible is served and the points left over are the ones
+    farthest from spare capacity. Those points get cluster_id UNSERVED (-1).
     Returns cluster_id of shape (n,).
     """
     X = np.asarray(X, dtype=float)
@@ -98,8 +107,19 @@ def _mcf_assignment(X, centers, w, capacities):
         )
     unit_cost = unit_cost.astype(np.int64)
 
+    # Shortfall only possible when every depot is capped and the caps fall
+    # short; otherwise the network is unchanged (no extra node or arcs).
+    short = int(capacities.sum()) < total_demand
+    if short:
+        # Any augmenting path that serves one more unit crosses at most 2k
+        # point-depot arcs, so this penalty always prefers serving.
+        penalty = (2 * k + 1) * (int(unit_cost.max()) + 1)
+        if penalty * total_demand > np.iinfo(np.int64).max:
+            raise OverflowError("unserved penalty exceeds int64 range")
+
     mcf = min_cost_flow.SimpleMinCostFlow()
     sink = n + k
+    unserved = n + k + 1
 
     # Supplies: points = demand, depots = 0, sink = -total
     mcf.set_nodes_supplies(np.arange(n, dtype=np.int32), w_int.astype(np.int64))
@@ -109,6 +129,10 @@ def _mcf_assignment(X, centers, w, capacities):
     mcf.set_nodes_supplies(
         np.array([sink], dtype=np.int32), np.array([-total_demand], dtype=np.int64)
     )
+    if short:
+        mcf.set_nodes_supplies(
+            np.array([unserved], dtype=np.int32), np.array([0], dtype=np.int64)
+        )
 
     # Depot → sink (capacity = demand cap)
     mcf.add_arcs_with_capacity_and_unit_cost(
@@ -128,6 +152,22 @@ def _mcf_assignment(X, centers, w, capacities):
         unit_cost[i_idx, j_idx],
     )
 
+    # Point → unserved (penalised) and unserved → sink, after the n×k block
+    # so the point→depot arc indices below stay the same.
+    if short:
+        mcf.add_arcs_with_capacity_and_unit_cost(
+            np.arange(n, dtype=np.int32),
+            np.full(n, unserved, dtype=np.int32),
+            w_int.astype(np.int64),
+            np.full(n, penalty, dtype=np.int64),
+        )
+        mcf.add_arcs_with_capacity_and_unit_cost(
+            np.array([unserved], dtype=np.int32),
+            np.array([sink], dtype=np.int32),
+            np.array([total_demand], dtype=np.int64),
+            np.array([0], dtype=np.int64),
+        )
+
     status = mcf.solve()
     if status != mcf.OPTIMAL:
         raise RuntimeError(f"MCF assignment failed with status {status}")
@@ -136,12 +176,20 @@ def _mcf_assignment(X, centers, w, capacities):
     flow_mat = np.asarray(
         mcf.flows(np.arange(k, k + n * k, dtype=np.int32)), dtype=np.int64
     ).reshape(n, k)
+    if short:
+        # Unserved flow becomes column k, so argmax can pick it.
+        unserved_flow = np.asarray(
+            mcf.flows(np.arange(k + n * k, k + n * k + n, dtype=np.int32)),
+            dtype=np.int64,
+        )
+        flow_mat = np.column_stack([flow_mat, unserved_flow])
     if np.any(flow_mat.sum(axis=1) <= 0):
         raise RuntimeError("MCF left some points unassigned")
 
     n_split = int(np.sum((flow_mat > 0).sum(axis=1) > 1))
-    # Repair: whole point to depot with largest flow share
+    # Repair: whole point to depot (or unserved) with largest flow share
     cluster_id = np.argmax(flow_mat, axis=1).astype(int)
+    cluster_id[cluster_id == k] = UNSERVED
 
     _LAST_CAP_STATS["split_points_last"] = n_split
     _LAST_CAP_STATS["split_points_max"] = max(
@@ -152,7 +200,10 @@ def _mcf_assignment(X, centers, w, capacities):
     # Whole-point repair can push a depot over its cap even though the
     # (splittable) MCF solve respected every cap exactly: this check is
     # reporting-only, it does not alter cluster_id or re-solve.
-    realised = np.bincount(cluster_id, weights=w_int, minlength=k).astype(np.int64)
+    served = cluster_id != UNSERVED
+    realised = np.bincount(
+        cluster_id[served], weights=w_int[served], minlength=k
+    ).astype(np.int64)
     overflow = np.maximum(realised - capacities, 0)
     _LAST_CAP_STATS["cap_overflow_last"] = int(overflow.sum())
     _LAST_CAP_STATS["cap_overflow_max"] = max(
@@ -190,6 +241,14 @@ def _assign_points(X, centers, w, capacities):
     return _mcf_assignment(X, centers, w, caps)
 
 
+def _weighted_distance(X, w, centers, cluster_id):
+    """Sum of demand x distance to the assigned depot; unserved points add 0."""
+    served = cluster_id != UNSERVED
+    if not np.all(served):
+        X, w, cluster_id = X[served], w[served], cluster_id[served]
+    return np.sum(w * np.linalg.norm(X - centers[cluster_id], axis=1))
+
+
 def _alternating_location_allocation(X, w, centers, fixed_mask=None, capacities=None):
     """One assign-relocate run from the given starting depots.
 
@@ -201,7 +260,7 @@ def _alternating_location_allocation(X, w, centers, fixed_mask=None, capacities=
     min-cost-flow assignment enforces the limits. Stops when the objective
     change drops below 1e-4 (max 50 iterations). Returns
     (centers, cluster_id, objective) where objective = sum of demand x distance
-    under the final assignment.
+    under the final assignment (unserved points, cluster_id UNSERVED, add 0).
     """
     centers = centers.astype(float).copy()
     prev_obj = np.inf
@@ -216,13 +275,13 @@ def _alternating_location_allocation(X, w, centers, fixed_mask=None, capacities=
             if np.any(mask):
                 centers[cid] = weighted_geometric_median(X[mask], w[mask])
 
-        obj = np.sum(w * np.linalg.norm(X - centers[cluster_id], axis=1))
+        obj = _weighted_distance(X, w, centers, cluster_id)
         if abs(prev_obj - obj) < 1e-4:
             break
         prev_obj = obj
 
     cluster_id = _assign_points(X, centers, w, capacities)
-    obj = float(np.sum(w * np.linalg.norm(X - centers[cluster_id], axis=1)))
+    obj = float(_weighted_distance(X, w, centers, cluster_id))
     return centers, cluster_id, obj
 
 
@@ -391,7 +450,11 @@ def solve_fixed_plus_variable_depots(
     (free depots stay unlimited). Accepts None (no caps), a scalar positive int
     (same cap on every fixed depot), or a length-m list of positive int | None
     (None = that fixed depot is uncapped). Demand must be integer-valued when
-    any cap is set. Optional progress_callback is called as
+    any cap is set. If every depot is capped (no free or uncapped fixed
+    depot) and the caps sum to less than total demand, the demand that does
+    not fit is left unserved: those points get cluster_id UNSERVED (-1) and
+    count toward no depot, showing where the network lacks capacity. The
+    objective then covers served demand only. Optional progress_callback is called as
     progress_callback(done, total, message) during multi-start. Returns
     (depots_df, assignments_df, objective) with is_fixed True for the first m
     depots.
@@ -425,17 +488,6 @@ def solve_fixed_plus_variable_depots(
     else:
         total_demand = int(np.rint(w.sum())) if np.allclose(w, np.rint(w)) else float(w.sum())
 
-    # Feasibility only when nothing can absorb overflow: no free depots and
-    # every fixed depot is capped. Caps are in demand (items).
-    if max_points is not None and n_free == 0 and all(c is not None for c in max_points):
-        cap_sum = int(sum(max_points))
-        if cap_sum < total_demand:
-            raise ValueError(
-                f"Infeasible capacity: fixed depot demand caps sum to {cap_sum} items "
-                f"< {total_demand} total demand (no free or uncapped fixed depot "
-                f"to take the rest)."
-            )
-
     # The m pinned depots occupy the first m centers, held in place by the mask.
     fixed_lats = np.array([c[0] for c in fixed_coords], dtype=float)
     fixed_lons = np.array([c[1] for c in fixed_coords], dtype=float)
@@ -453,6 +505,8 @@ def solve_fixed_plus_variable_depots(
     _LAST_CAP_STATS["cap_overflow_last"] = 0
     _LAST_CAP_STATS["cap_overflow_max"] = 0
     _LAST_CAP_STATS["cap_overflow_by_depot"] = []
+    _LAST_CAP_STATS["unserved_points"] = 0
+    _LAST_CAP_STATS["unserved_demand"] = 0
     if max_points is None:
         capacities = None
     else:
@@ -492,6 +546,10 @@ def solve_fixed_plus_variable_depots(
         centers, cluster_id, obj = best
 
     data["cluster_id"] = cluster_id
+    unserved = cluster_id == UNSERVED
+    if np.any(unserved):
+        _LAST_CAP_STATS["unserved_points"] = int(unserved.sum())
+        _LAST_CAP_STATS["unserved_demand"] = int(np.rint(w[unserved].sum()))
 
     depot_rows = []
     for cid in range(k_total):

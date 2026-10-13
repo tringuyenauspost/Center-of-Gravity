@@ -218,6 +218,18 @@ def format_cap_note(depots_df):
     )
 
 
+def format_unserved_note(assignments_df):
+    """One-line note when capacity left demand unserved (cluster_id -1); else None."""
+    unserved = assignments_df["cluster_id"] == -1
+    if not unserved.any():
+        return None
+    demand = float(assignments_df.loc[unserved, "demand"].sum())
+    total = float(assignments_df["demand"].sum())
+    pct = demand / total * 100.0 if total else 0.0
+    return (f"Unserved: {int(unserved.sum()):,} points, {demand:,.0f} items "
+            f"({pct:.1f}% of demand) exceed total depot capacity")
+
+
 # ============================================================
 # GUI Application
 # ============================================================
@@ -611,8 +623,15 @@ class CogApp(ctk.CTk):
         if cap_note is not None:
             self.output_box.insert("end", f"\n\n{cap_note}")
             self.log(cap_note)
+        unserved_note = format_unserved_note(assignments_df)
+        if unserved_note is not None:
+            self.output_box.insert("end", f"\n\n{unserved_note}")
+            self.log(unserved_note)
         if objective is not None:
-            summary = format_objective(objective, float(assignments_df["demand"].sum()))
+            # Unserved points add nothing to the objective, so average over served demand.
+            served = assignments_df["cluster_id"] != -1
+            summary = format_objective(
+                objective, float(assignments_df.loc[served, "demand"].sum()))
             self.output_box.insert("end", f"\n\n{summary}")
             self.log(summary)
         run_meta = {

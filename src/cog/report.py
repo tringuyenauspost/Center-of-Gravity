@@ -41,6 +41,12 @@ CLUSTER_HEX = (
 )
 
 
+# Near-black for demand no depot had capacity to serve (cluster_id -1): it
+# sits outside the depot palette so a capacity gap never reads as a catchment.
+UNSERVED_HEX = "#111827"
+UNSERVED_ID = -1
+
+
 def cluster_hex(cluster_id):
     """Hex colour for cluster/depot id when the run has at most 12 depots."""
     return CLUSTER_HEX[int(cluster_id) % len(CLUSTER_HEX)]
@@ -141,6 +147,13 @@ def _dashboard_context(assignments_df, depots_df, solver_type, objective=None, r
     )
     has_fixed = "is_fixed" in depots_df.columns
 
+    # Points no depot had capacity for (capped Fixed runs only) belong to no
+    # depot row, so the reconciliation below covers served demand only.
+    unserved_mask = (assignments_df["cluster_id"] == UNSERVED_ID).to_numpy()
+    n_unserved = int(unserved_mask.sum())
+    unserved_demand = float(assignments_df["demand"].to_numpy()[unserved_mask].sum())
+    has_unserved = n_unserved > 0
+
     has_cap = "max_points" in depots_df.columns
     has_name = "depot_name" in depots_df.columns
     palette = cluster_colors(depots_df)
@@ -197,12 +210,14 @@ def _dashboard_context(assignments_df, depots_df, solver_type, objective=None, r
 
     # Single-source-of-truth guard: the per-depot breakdown must reconcile with
     # the totals, or the report would disagree with the log about the counts.
-    if sum_points != n_points:
+    if sum_points + n_unserved != n_points:
         raise ValueError(
-            f"per-depot points {sum_points} != total demand points {n_points}")
-    if abs(sum_demand - total_demand) > 1e-6 * max(1.0, abs(total_demand)):
+            f"per-depot points {sum_points} + unserved {n_unserved} "
+            f"!= total demand points {n_points}")
+    if abs(sum_demand + unserved_demand - total_demand) > 1e-6 * max(1.0, abs(total_demand)):
         raise ValueError(
-            f"per-depot demand {sum_demand} != total demand {total_demand}")
+            f"per-depot demand {sum_demand} + unserved {unserved_demand} "
+            f"!= total demand {total_demand}")
 
     # One point = [lat, lon, demand, cluster_id]; coords rounded to 5 dp (~1 m).
     # Compact array, no per-point JS objects — the radius is scaled in the
@@ -216,6 +231,18 @@ def _dashboard_context(assignments_df, depots_df, solver_type, objective=None, r
     demands = assignments_df["demand"].to_numpy(dtype=float)
     cluster_ids = sorted({int(c) for c in assignments_df["cluster_id"]})
     colors = {cid: palette.get(cid, cluster_hex(cid)) for cid in cluster_ids}
+    if has_unserved:
+        colors[UNSERVED_ID] = UNSERVED_HEX
+    unserved_pct = (unserved_demand / total_demand * 100.0) if total_demand else 0.0
+    unserved = {
+        "color": UNSERVED_HEX,
+        "ink": ink_on(UNSERVED_HEX),
+        "points": n_unserved,
+        "points_label": f"{n_unserved:,}",
+        "demand": f"{unserved_demand:,.0f}",
+        "pct": f"{unserved_pct:.1f}",
+        "demand_raw": unserved_demand,
+    }
     center = [float(assignments_df["lat"].mean()), float(assignments_df["lon"].mean())]
 
     # True only when at least one depot carried a numeric max_points (cap-on
@@ -242,6 +269,10 @@ def _dashboard_context(assignments_df, depots_df, solver_type, objective=None, r
         "objective_item_m": objective_item_m,
         "largest_depot_demand_share_pct": max_share,
     }
+    # Added only when present, so runs without a shortfall keep their exact output.
+    if has_unserved:
+        run_json["unserved_points"] = n_unserved
+        run_json["unserved_demand_items"] = unserved_demand
 
     return {
         "solver_type": solver_type,
@@ -249,6 +280,9 @@ def _dashboard_context(assignments_df, depots_df, solver_type, objective=None, r
         "show_multi": solver_type == "Multi Depot",
         "show_fixed": solver_type == "Fixed + Variable Depots",
         "has_fixed_cap": has_fixed_cap,
+        "has_unserved": has_unserved,
+        "unserved": unserved,
+        "unserved_json": json.dumps(unserved),
         "stat_depots": len(depots),
         "stat_points": f"{n_points:,}",
         "stat_demand": f"{total_demand:,.0f}",

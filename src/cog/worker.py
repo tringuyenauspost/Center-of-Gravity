@@ -66,7 +66,9 @@ def execute_job(job, progress):
             print(
                 f"[capacity] MCF calls={stats.get('mcf_calls', 0)} "
                 f"split_points_last={stats.get('split_points_last', 0)} "
-                f"split_points_max={stats.get('split_points_max', 0)}",
+                f"split_points_max={stats.get('split_points_max', 0)} "
+                f"unserved_points={stats.get('unserved_points', 0)} "
+                f"unserved_demand={stats.get('unserved_demand', 0)}",
                 flush=True,
             )
             # Copied here: the stats live in the solver module's globals, which

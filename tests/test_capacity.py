@@ -108,15 +108,20 @@ def test_fixed_demand_cap_binds_only_fixed_depots():
     assert int(depots_df["n_nodes"].sum()) == n
 
 
-def test_all_fixed_infeasible_demand_cap_raises():
-    """With no free depots, fixed demand caps must cover total demand."""
+def test_all_fixed_short_capacity_leaves_rest_unserved():
+    """No free depots and caps below total demand: the rest is unserved (-1)."""
     df = _integer_demand_fixture()
-    total = float(df.loc[df["demand"] > 0, "demand"].sum())
-    with pytest.raises(ValueError, match="Infeasible capacity"):
-        solve_fixed_plus_variable_depots(
-            df, n_free=0, fixed_coords=gg.FIXED_COORDS, max_points=1
-        )
-    assert total > 1
+    total = int(df.loc[df["demand"] > 0, "demand"].sum())
+    depots_df, assignments_df, _ = solve_fixed_plus_variable_depots(
+        df, n_free=0, fixed_coords=gg.FIXED_COORDS, max_points=1
+    )
+    unserved = assignments_df["cluster_id"] == -1
+    stats = get_last_cap_stats()
+    assert int(depots_df["assigned_total_demand"].sum()) == 1
+    assert int(unserved.sum()) == total - 1
+    assert stats["unserved_points"] == total - 1
+    assert stats["unserved_demand"] == total - 1
+    assert int(depots_df["n_nodes"].sum()) + int(unserved.sum()) == len(assignments_df)
 
 
 def test_fixed_plus_free_small_demand_cap_is_feasible():
@@ -148,16 +153,52 @@ def test_per_depot_demand_cap_list_binds_only_capped_fixed():
     assert int(depots_df["n_nodes"].sum()) == n
 
 
-def test_all_fixed_infeasible_cap_sum_raises():
-    """All fixed, every depot demand-capped, sum(caps) < total demand → error."""
+def test_all_fixed_short_cap_sum_serves_nearest_points():
+    """Every depot capped, caps < demand: caps fill and the far points go unserved."""
     df = _integer_demand_fixture()
-    total = float(df.loc[df["demand"] > 0, "demand"].sum())
+    total = int(df.loc[df["demand"] > 0, "demand"].sum())
     coords = list(gg.FIXED_COORDS) + [(gg.FIXED_LAT + 0.02, gg.FIXED_LON)]
-    with pytest.raises(ValueError, match="Infeasible capacity"):
-        solve_fixed_plus_variable_depots(
-            df, n_free=0, fixed_coords=coords, max_points=[1, 1]
+    caps = [3, 4]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        depots_df, assignments_df, objective = solve_fixed_plus_variable_depots(
+            df, n_free=0, fixed_coords=coords, max_points=caps
         )
-    assert total > 2
+    served = assignments_df[assignments_df["cluster_id"] >= 0]
+    unserved = assignments_df[assignments_df["cluster_id"] == -1]
+    # Unit demand, so no split points: every cap is used exactly.
+    assert depots_df["assigned_total_demand"].tolist() == [3.0, 4.0]
+    assert len(unserved) == total - sum(caps)
+    assert len(served) == sum(caps)
+    assert objective > 0
+
+    # Served points are no farther from their depot than any unserved point
+    # is from its nearest depot (MCF fills caps with the closest demand).
+    lat = np.array([c[0] for c in coords]); lon = np.array([c[1] for c in coords])
+
+    def nearest_deg(rows):
+        d = np.hypot(rows["lat"].to_numpy()[:, None] - lat[None, :],
+                     rows["lon"].to_numpy()[:, None] - lon[None, :])
+        return d.min(axis=1)
+    assert nearest_deg(served).max() <= nearest_deg(unserved).min() + 1e-3
+
+
+def test_short_capacity_report_shows_unserved(tmp_path):
+    """The dashboard reconciles served + unserved and lists the unserved row."""
+    from cog.report import UNSERVED_HEX, render_dashboard
+
+    df = _integer_demand_fixture()
+    depots_df, assignments_df, objective = solve_fixed_plus_variable_depots(
+        df, n_free=0, fixed_coords=gg.FIXED_COORDS, max_points=5
+    )
+    n_unserved = int((assignments_df["cluster_id"] == -1).sum())
+    out = render_dashboard(assignments_df, depots_df, str(tmp_path / "r.html"),
+                           "Fixed + Variable Depots", objective=objective)
+    html = open(out, encoding="utf-8").read()
+    assert 'data-cluster="-1"' in html
+    assert "Unserved volume" in html
+    assert f'"-1": "{UNSERVED_HEX}"' in html
+    assert f'"unserved_points": {n_unserved}' in html
 
 
 def test_all_fixed_with_one_none_cap_does_not_raise():
